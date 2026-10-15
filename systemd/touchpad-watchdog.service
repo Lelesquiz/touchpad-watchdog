@@ -1,0 +1,10 @@
+[Unit]
+Description=Reset the touchpad when its firmware reports a stuck ghost finger
+
+[Service]
+ExecStart=/usr/local/sbin/touchpad-watchdog
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

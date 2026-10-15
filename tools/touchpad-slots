@@ -1,0 +1,55 @@
+#!/usr/bin/python3 -I
+"""Show the touches the kernel currently sees on the touchpad.
+
+Run it as root (sudo) without touching the touchpad: any ACTIVE slot is a
+ghost finger reported by the firmware.
+"""
+import array
+import fcntl
+import glob
+import struct
+import sys
+
+DEVICE_NAME = "ASUP1204:00 093A:2642 Touchpad"
+KEYS = {0x110: "BTN_LEFT", 0x145: "BTN_TOOL_FINGER", 0x14A: "BTN_TOUCH",
+        0x14D: "BTN_TOOL_DOUBLETAP", 0x14E: "BTN_TOOL_TRIPLETAP",
+        0x14F: "BTN_TOOL_QUADTAP", 0x148: "BTN_TOOL_QUINTTAP"}
+
+
+def ioc_read(nr, size):
+    return (2 << 30) | (size << 16) | (ord("E") << 8) | nr
+
+
+def find_device():
+    for path in glob.glob("/sys/class/input/event*/device/name"):
+        with open(path) as f:
+            if f.read().strip() == DEVICE_NAME:
+                return "/dev/input/" + path.split("/")[4]
+    sys.exit(f"device '{DEVICE_NAME}' not found")
+
+
+def main():
+    dev = sys.argv[1] if len(sys.argv) > 1 else find_device()
+    with open(dev, "rb") as fd:
+        absinfo = bytearray(24)
+        fcntl.ioctl(fd, ioc_read(0x40 + 0x2F, 24), absinfo)
+        n = struct.unpack("6i", absinfo)[2] + 1
+
+        def slots(code):
+            buf = array.array("i", [code] + [0] * n)
+            fcntl.ioctl(fd, ioc_read(0x0A, 4 * (n + 1)), buf)
+            return list(buf[1:])
+
+        tid, x, y = slots(0x39), slots(0x35), slots(0x36)
+        print(dev)
+        for i in range(n):
+            mark = "   <-- ACTIVE" if tid[i] >= 0 else ""
+            print(f"slot {i}: tracking_id={tid[i]:>6}  x={x[i]:>5} y={y[i]:>5}{mark}")
+        keys = bytearray(96)
+        fcntl.ioctl(fd, ioc_read(0x18, 96), keys)
+        down = [name for code, name in KEYS.items() if keys[code // 8] >> (code % 8) & 1]
+        print("keys down:", ", ".join(down) or "none")
+
+
+if __name__ == "__main__":
+    main()

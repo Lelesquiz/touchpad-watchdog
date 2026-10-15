@@ -1,0 +1,7 @@
+#!/bin/sh
+# Reload the ASUP1204 I2C touchpad driver (unsticks a frozen touchpad).
+DEV=i2c-ASUP1204:00
+DRV=/sys/bus/i2c/drivers/i2c_hid_acpi
+[ -e "$DRV/$DEV" ] && echo "$DEV" > "$DRV/unbind"
+sleep 1
+echo "$DEV" > "$DRV/bind"

@@ -1,0 +1,130 @@
+#!/usr/bin/python3 -I
+"""Reset the ASUP1204 touchpad when its firmware reports a ghost finger.
+
+The firmware sometimes keeps reporting a contact that does not exist, at the
+exact same coordinates, until the device is reset. A real finger never stays
+perfectly still for long, so a contact whose tracking id and x/y are
+unchanged for STUCK_SECONDS is treated as a ghost: the touchpad is reset and
+the logged-in users get a desktop notification.
+
+Polls the kernel's multitouch slot state with EVIOCGMTSLOTS, which only
+reads state and does not consume or grab events.
+"""
+import array
+import fcntl
+import glob
+import os
+import struct
+import subprocess
+import sys
+import time
+
+DEVICE_NAME = "ASUP1204:00 093A:2642 Touchpad"
+RESET_CMD = ["/usr/local/sbin/touchpad-reset"]
+STUCK_SECONDS = 8
+POLL_SECONDS = 1
+COOLDOWN_SECONDS = 10
+DRY_RUN = "--dry-run" in sys.argv
+
+ABS_MT_SLOT, ABS_MT_POSITION_X, ABS_MT_POSITION_Y, ABS_MT_TRACKING_ID = 0x2F, 0x35, 0x36, 0x39
+
+
+def ioc_read(nr, size):
+    return (2 << 30) | (size << 16) | (ord("E") << 8) | nr
+
+
+def log(msg):
+    print(msg, flush=True)
+
+
+def find_device():
+    for path in glob.glob("/sys/class/input/event*/device/name"):
+        try:
+            with open(path) as f:
+                if f.read().strip() == DEVICE_NAME:
+                    return "/dev/input/" + path.split("/")[4]
+        except OSError:
+            pass
+    return None
+
+
+def slot_count(fd):
+    absinfo = bytearray(24)
+    fcntl.ioctl(fd, ioc_read(0x40 + ABS_MT_SLOT, 24), absinfo)
+    return struct.unpack("6i", absinfo)[2] + 1
+
+
+def read_slots(fd, code, n):
+    buf = array.array("i", [code] + [0] * n)
+    fcntl.ioctl(fd, ioc_read(0x0A, 4 * (n + 1)), buf)
+    return list(buf[1:])
+
+
+def active_contacts(fd, n):
+    """Return {slot: (tracking_id, x, y)} for every active slot."""
+    tid = read_slots(fd, ABS_MT_TRACKING_ID, n)
+    x = read_slots(fd, ABS_MT_POSITION_X, n)
+    y = read_slots(fd, ABS_MT_POSITION_Y, n)
+    return {i: (tid[i], x[i], y[i]) for i in range(n) if tid[i] >= 0}
+
+
+def notify(body):
+    """Show a desktop notification in every running user session."""
+    for bus in glob.glob("/run/user/*/bus"):
+        uid = int(bus.split("/")[3])
+        env = {"DBUS_SESSION_BUS_ADDRESS": "unix:path=" + bus, "PATH": "/usr/bin:/bin"}
+        try:
+            subprocess.run(
+                ["setpriv", f"--reuid={uid}", f"--regid={os.stat(bus).st_gid}", "--init-groups",
+                 "notify-send", "--app-name=Touchpad", "--icon=input-touchpad",
+                 "Touchpad resettato", body],
+                env=env, timeout=10, check=False,
+            )
+        except (OSError, subprocess.SubprocessError) as e:
+            log(f"notification for uid {uid} failed: {e}")
+
+
+def reset(contact):
+    tid, x, y = contact
+    log(f"ghost contact tracking_id={tid} at x={x} y={y} unchanged for {STUCK_SECONDS}s, resetting")
+    if DRY_RUN:
+        log("dry run: not resetting")
+        return
+    subprocess.run(RESET_CMD, timeout=30, check=False)
+    notify(f"Rilevato un dito fantasma fermo a x={x}, y={y}. Il touchpad è stato ripristinato.")
+
+
+def watch(dev):
+    with open(dev, "rb") as fd:
+        n = slot_count(fd)
+        log(f"watching {dev} ({n} slots)")
+        first_seen = {}  # (tracking_id, x, y) -> monotonic time first seen
+        while True:
+            now = time.monotonic()
+            contacts = set(active_contacts(fd, n).values())
+            first_seen = {c: first_seen.get(c, now) for c in contacts}
+            stuck = [c for c, t in first_seen.items() if now - t >= STUCK_SECONDS]
+            if stuck:
+                reset(stuck[0])
+                if not DRY_RUN:
+                    return  # the device node goes away on reset; reopen it
+                first_seen = {}
+            time.sleep(POLL_SECONDS)
+
+
+def main():
+    while True:
+        dev = find_device()
+        if dev is None:
+            time.sleep(POLL_SECONDS)
+            continue
+        try:
+            watch(dev)
+            time.sleep(COOLDOWN_SECONDS)
+        except OSError as e:
+            log(f"{dev}: {e}, reopening")
+            time.sleep(POLL_SECONDS)
+
+
+if __name__ == "__main__":
+    main()
