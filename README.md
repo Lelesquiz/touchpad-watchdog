@@ -47,7 +47,7 @@ does not intercept, slow down or modify events.
 ## Installation
 
 ```sh
-git clone https://github.com/<user>/touchpad-watchdog.git
+git clone https://github.com/Lelesquiz/touchpad-watchdog.git
 cd touchpad-watchdog
 ./install.sh
 ```
